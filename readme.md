@@ -62,7 +62,7 @@
 
 1. Клонируйте проект:
    ```
-   git clone https://github.com/your-repo/SmartTemp.git
+   git clone https://github.com/gelios02/SmartTemp.git
    cd SmartTemp
    ```
 
