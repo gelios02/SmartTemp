@@ -1,24 +1,75 @@
-import os
+import os	
 import sqlite3
 import random
 import datetime
 import textwrap
 import matplotlib.pyplot as plt
 import requests  # для работы с API погоды
+import paho.mqtt.client as mqtt
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 )
+from threading import Thread
+
+MQTT_BROKER = "localhost"  
+MQTT_PORT = 1883
+TOPICS = {
+    "tempC": "sensors/temperature",
+    "Humidity": "sensors/humidity",
+    "q": "sensors/thermal"
+}
+
+
 
 # Файл БД SQLite
 DB_FILE = 'sensor_data.db'
 
 # Глобальные переменные для симуляции и уведомлений
-simulation_counter = 0
+# simulation_counter = 0
 ADMIN_CHAT_ID = None
 
 SPIKE_THRESHOLD = 2.0  # Минимальное изменение для внутреннего датчика, чтобы считать резким скачком
 
+class MQTTClientHandler:
+    def __init__(self):
+        self.client = mqtt.Client()
+        self.client.on_connect = self.on_connect
+        self.client.on_message = self.on_message
+        
+    def on_connect(self, client, userdata, flags, rc):
+        print("Connected to MQTT Broker")
+        for topic in TOPICS.values():
+            client.subscribe(topic)
+            
+    def on_message(self, client, userdata, msg):
+        sensor_type = None
+        for key, topic in TOPICS.items():
+            if msg.topic == topic:
+                sensor_type = key
+                break
+                
+        if sensor_type:
+            try:
+                value = float(msg.payload.decode())
+                self.save_to_db(sensor_type, value)
+                print(f"Received {sensor_type}: {value}")
+            except ValueError:
+                print(f"Invalid data for {sensor_type}")
+
+    def save_to_db(self, sensor, value):
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO sensor_data (sensor, value, timestamp) VALUES (?, ?, ?)",
+            (sensor, value, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        )
+        conn.commit()
+        conn.close()
+
+    def start(self):
+        self.client.connect(MQTT_BROKER, MQTT_PORT)
+        Thread(target=self.client.loop_forever, daemon=True).start()
 
 # Функции работы с БД
 def check_and_create_db():
@@ -35,54 +86,6 @@ def check_and_create_db():
     ''')
     conn.commit()
     conn.close()
-
-
-def simulate_temp_data(timestamp=None):
-    """Генерация нормальной температуры в комнате (18-25 °C).
-       Заменить датчиком!!!"""
-    temp = random.uniform(18, 25)
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    if timestamp:
-        c.execute("INSERT INTO sensor_data (sensor, value, timestamp) VALUES (?, ?, ?)",
-                  ("tempC", temp, timestamp))
-    else:
-        c.execute("INSERT INTO sensor_data (sensor, value) VALUES (?, ?)", ("tempC", temp))
-    conn.commit()
-    conn.close()
-    return temp
-
-
-def simulate_humidity_data(timestamp=None):
-    """Генерация нормальной влажности в комнате (30-60 %).
-       Заменить датчиком!!!"""
-    humidity = random.uniform(30, 60)
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    if timestamp:
-        c.execute("INSERT INTO sensor_data (sensor, value, timestamp) VALUES (?, ?, ?)",
-                  ("Humidity", humidity, timestamp))
-    else:
-        c.execute("INSERT INTO sensor_data (sensor, value) VALUES (?, ?)", ("Humidity", humidity))
-    conn.commit()
-    conn.close()
-    return humidity
-
-
-def simulate_q_data(timestamp=None):
-    """Генерация нормального теплового потока на улице (0-50 условных единиц).
-       Заменить датчиком!!!"""
-    q_value = random.uniform(0, 50)
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    if timestamp:
-        c.execute("INSERT INTO sensor_data (sensor, value, timestamp) VALUES (?, ?, ?)",
-                  ("q", q_value, timestamp))
-    else:
-        c.execute("INSERT INTO sensor_data (sensor, value) VALUES (?, ?)", ("q", q_value))
-    conn.commit()
-    conn.close()
-    return q_value
 
 
 def get_current_data(sensor):
@@ -278,54 +281,6 @@ def check_spike_alert():
     return False, "Резкий перепад не обнаружен или данных недостаточно."
 
 
-# --- Фоновая задача симуляции данных ---
-async def sensor_simulation_job(context: ContextTypes.DEFAULT_TYPE):
-    """
-    Фоновая задача, которая каждые 5 минут генерирует данные.
-    Каждые 10 минут (т.е. каждые две итерации) для температуры генерируется скачок.
-    После генерации данных вызывается объединённая проверка (внутренняя температура + тепловой поток)
-    для определения, нужно ли отправлять уведомление.
-
-    Заменить датчиком!!! (При переходе на реальные данные – заменить вызовы симуляционных функций)
-    """
-    global simulation_counter, ADMIN_CHAT_ID
-    simulation_counter += 1
-    timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    # Генерируем данные для влажности и теплового потока
-    simulate_humidity_data(timestamp_str)
-    simulate_q_data(timestamp_str)
-    # Для температуры: каждые две итерации генерируем скачок
-    if simulation_counter % 2 == 0:
-        temp_spike = random.uniform(30, 35)
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute("INSERT INTO sensor_data (sensor, value, timestamp) VALUES (?, ?, ?)",
-                  ("tempC", temp_spike, timestamp_str))
-        conn.commit()
-        conn.close()
-    else:
-        simulate_temp_data(timestamp_str)
-
-    # Объединённая проверка: если обнаружен резкий перепад внутренней температуры или теплового потока,
-    # отправляем уведомление.
-    spike, message = check_spike_alert()
-    if spike and ADMIN_CHAT_ID:
-        await context.bot.send_message(
-            chat_id=ADMIN_CHAT_ID,
-            text=f"Alert: обнаружен резкий перепад: {message}!"
-        )
-        # Генерируем график с аннотацией для внутренних показаний, если перепад внутренней температуры обнаружен
-        if "внутренней температуры" in message:
-            alert_graph = generate_alert_graph("tempC", 60, message)
-            if alert_graph and os.path.exists(alert_graph):
-                await context.bot.send_photo(chat_id=ADMIN_CHAT_ID, photo=open(alert_graph, 'rb'))
-        # Если перепад обнаружен по тепловому потоку, генерируем график для него
-        if "теплового потока" in message:
-            alert_graph = generate_alert_graph("q", 60, message)
-            if alert_graph and os.path.exists(alert_graph):
-                await context.bot.send_photo(chat_id=ADMIN_CHAT_ID, photo=open(alert_graph, 'rb'))
-
-
 # --- Функции формирования меню ---
 def build_main_menu():
     keyboard = [
@@ -452,14 +407,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     check_and_create_db()  # Создаём базу
+    mqtt_handler = MQTTClientHandler()
+    mqtt_handler.start()  # Запуск в фоновом потоке
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
 
     # Планировщик фоновой задачи: каждые 5 минут
-    job_queue = app.job_queue  # Для работы JobQueue
-    job_queue.run_repeating(sensor_simulation_job, interval=300, first=10)
+    # job_queue = app.job_queue  # Для работы JobQueue
+    # job_queue.run_repeating(sensor_simulation_job, interval=300, first=10)
 
     print("Бот запущен, начинаем опрос обновлений...")
     app.run_polling()
