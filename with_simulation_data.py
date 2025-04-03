@@ -326,7 +326,7 @@ async def sensor_simulation_job(context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_photo(chat_id=ADMIN_CHAT_ID, photo=open(alert_graph, 'rb'))
 
 
-# --- Функции формирования меню ---
+# Функции формирования меню
 def build_main_menu():
     keyboard = [
         [InlineKeyboardButton("Текущие показания", callback_data="get_current")],
