@@ -108,7 +108,7 @@ void loop(void) {
   client.publish("sensors/humidity", String(Humidity).c_str());
   client.publish("sensors/thermal", String(q).c_str());
 
-   delay(5000);
+   delay(59000);
 
    } 
    
