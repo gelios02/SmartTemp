@@ -7,9 +7,7 @@ import matplotlib.pyplot as plt
 import requests
 import paho.mqtt.client as mqtt
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 from threading import Thread
 import time
 
@@ -224,21 +222,25 @@ def check_spike_alert():
     messages = []
     if spike_external:
         if direction == "increase":
-            messages.append(
-                f"температура (рост: изменение {diff_external:.2f}°C, тек. {external_current:.2f}°C, API: {external_temp_api:.2f}°C)"
-            )
+            messages.append(f"внешней температуры (рост: изменение {diff_external:.2f}°C, тек. {external_current:.2f}°C, API: {external_temp_api:.2f}°C)")
         elif direction == "decrease":
-            messages.append(
-                f"температура (падение: изменение {diff_external:.2f}°C, тек. {external_current:.2f}°C, API: {external_temp_api:.2f}°C)"
-            )
+            messages.append(f"внешней температуры (падение: изменение {diff_external:.2f}°C, тек. {external_current:.2f}°C, API: {external_temp_api:.2f}°C)")
     if spike_internal:
         if diff_internal > 0:
-            messages.append(f"температура (рост: изменение {diff_internal:.2f}°C)")
+            messages.append(f"внутренней температуры (рост: изменение {diff_internal:.2f}°C)")
         else:
-            messages.append(f"температура (падение: изменение {diff_internal:.2f}°C)")
+            messages.append(f"внутренней температуры (падение: изменение {diff_internal:.2f}°C)")
     if messages:
         return True, "; ".join(messages)
     return False, "Резкий перепад не обнаружен или данных недостаточно."
+
+def get_all_users():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT chat_id FROM users")
+    rows = c.fetchall()
+    conn.close()
+    return [row[0] for row in rows]
 
 def build_main_menu():
     keyboard = [
@@ -274,13 +276,7 @@ def build_period_menu():
     return InlineKeyboardMarkup(keyboard)
 
 async def send_main_menu(chat_id, context: ContextTypes.DEFAULT_TYPE):
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text="Выберите действие:",
-        reply_markup=build_main_menu()
-    )
-
-TOKEN = '7452678432:AAFXVD4xr1e8ygYmA1S14GIkUCFP_1IxaHc'
+    await context.bot.send_message(chat_id=chat_id, text="Выберите действие:", reply_markup=build_main_menu())
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global ADMIN_CHAT_ID
@@ -346,28 +342,28 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if spike:
                 text = f"Обнаружен резкий перепад: {message}"
                 await query.edit_message_text(text=text)
-                internal_msg = "; ".join([m.strip() for m in message.split(";") if "внутренней температуры" in m])
-                if not internal_msg:
-                    internal_msg = message
-                external_msg = "; ".join([m.strip() for m in message.split(";") if "внешней температуры" in m])
-                if not external_msg:
-                    external_msg = message
+                internal_parts = [m.strip() for m in message.split(";") if "внутренней температуры" in m]
+                if internal_parts:
+                    internal_msg = "; ".join(internal_parts)
+                else:
+                    internal_msg = "Резкий перепад внутренней температуры"
+                external_parts = [m.strip() for m in message.split(";") if "внешней температуры" in m]
+                if external_parts:
+                    external_msg = "; ".join(external_parts)
+                else:
+                    external_msg = "Резкий перепад внешней температуры"
                 alert_graph_temp = generate_alert_graph("tempC", 360, internal_msg)
                 if alert_graph_temp and os.path.exists(alert_graph_temp):
                     print("Отправляю график с аномалией для tempC")
-                    await context.bot.send_photo(
-                        chat_id=update.effective_chat.id,
-                        photo=open(alert_graph_temp, 'rb')
-                    )
+                    await context.bot.send_photo(chat_id=update.effective_chat.id,
+                                                 photo=open(alert_graph_temp, 'rb'))
                 else:
                     print("График для tempC не создан или нет данных")
                 alert_graph_q = generate_alert_graph("q", 360, external_msg)
                 if alert_graph_q and os.path.exists(alert_graph_q):
                     print("Отправляю график с аномалией для q")
-                    await context.bot.send_photo(
-                        chat_id=update.effective_chat.id,
-                        photo=open(alert_graph_q, 'rb')
-                    )
+                    await context.bot.send_photo(chat_id=update.effective_chat.id,
+                                                 photo=open(alert_graph_q, 'rb'))
                 else:
                     print("График для q не создан или нет данных")
             else:
@@ -379,10 +375,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_main_menu(update.effective_chat.id, context)
     except Exception as e:
         print("Ошибка в button_handler:", e)
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="Произошла ошибка при обработке вашего запроса."
-        )
+        await context.bot.send_message(chat_id=update.effective_chat.id,
+                                       text="Произошла ошибка при обработке вашего запроса.")
+
+async def sensor_alert_job(context: ContextTypes.DEFAULT_TYPE):
+    spike, message = check_spike_alert()
+    if spike:
+        users = get_all_users()
+        for user in users:
+            await context.bot.send_message(chat_id=user, text=f"Автоматический алерт! {message}")
+            alert_graph_temp = generate_alert_graph("tempC", 360, message)
+            if alert_graph_temp and os.path.exists(alert_graph_temp):
+                await context.bot.send_photo(chat_id=user, photo=open(alert_graph_temp, 'rb'))
+            alert_graph_q = generate_alert_graph("q", 360, message)
+            if alert_graph_q and os.path.exists(alert_graph_q):
+                await context.bot.send_photo(chat_id=user, photo=open(alert_graph_q, 'rb'))
 
 def main():
     check_and_create_db()
@@ -391,6 +398,7 @@ def main():
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
+    app.job_queue.run_repeating(sensor_alert_job, interval=300, first=10)
     print("Бот запущен, начинаем опрос обновлений...")
     app.run_polling()
 
